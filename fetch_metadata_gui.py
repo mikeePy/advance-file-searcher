@@ -1,36 +1,28 @@
 """
-fetch_metadata_gui.py
-=====================
-Desktop GUI for fetching movie posters and NFO metadata from TMDB.
+fetch_metadata_gui.py  (skip-if-complete edition)
+==================================================
+Desktop GUI for fetching posters and NFO metadata from TMDB.
+Handles BOTH movies and TV series via a batch-level type toggle.
 
-Key features in this version
-----------------------------
-• Strong query cleaner
-    - strips [YTS.MX] / 【...】 / {...} blocks
-    - strips (720p...) / (Extended) / (Directors.Cut) parentheses
-    - strips release groups: YTS, YIFY, VXT, AcEs, Ganool, CMCT, BYNDR,
-      Flux, GalaxyRG, ETRG, Fugi, Deceit, BOKUTOX, P2P, etc.
-    - strips quality / codec / language tokens: 720p, BluRay, WEB-DL,
-      HDRip, x264, x265, AAC, DDP, Atmos, Extended, JAPANESE, subs, …
-    - strips episode markers: "Episode 1", "S01E02"
-    - extracts a year (1900-2099) as the LAST match found
-    - keeps Unicode titles (Chinese, Japanese, Korean) intact
+New in this version
+-------------------
+• "Skip folders that already have poster.jpg + .nfo" checkbox
+  (default ON). When adding folders — single or bulk — any
+  folder that already contains BOTH a poster.jpg AND at least
+  one .nfo file is skipped and NOT added to the process list.
+• Add-skipped folders are counted and logged.
+• Trying to single-add a folder that's already complete shows
+  an information dialog so you know why nothing happened.
+• The check is case-insensitive (Poster.JPG, MOVIE.NFO, etc.
+  all count) so it works on both Windows and Linux.
 
-• Query variants (fixes Ant-Man, Kiki's Delivery Service, etc.)
-    - "Ant Man"  (hyphen → space)
-    - "AntMan"   (hyphen removed)
-    - "Ant-Man"  (original)
-    - "Kikis Delivery Service" (apostrophes removed)
-
-• Search resilience
-    - tries every variant WITH year first, then WITHOUT year
-    - handles HTTP 429 (rate-limit) gracefully
-    - logs every attempt so you can see what was tried
-
-• Editable query per row
-    - right-click → "✏️ Edit query…"
-    - or double-click the Query / Year column
-    - after editing, the row clears its old match and can be re-searched
+Still included
+--------------
+• Season / S0x / COMPLETE / 第X季 / 全XX集 markers stripped
+• Year verification (prefers results matching the folder's year)
+• Batch media-type toggle: Movie or TV
+• Manual query editor and TMDB ID override (right-click)
+• Background worker thread, progress bar, live log
 
 Requirements:
     pip install requests
@@ -71,7 +63,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 # ---------------------------------------------------------------------------
-# Config persistence
+# Config
 # ---------------------------------------------------------------------------
 
 CONFIG_LOCATIONS = [
@@ -109,52 +101,54 @@ LANGUAGES = [
 ]
 IMAGE_SIZES = ["w342", "w500", "w780", "original"]
 
-TMDB_SEARCH_URL = "https://api.themoviedb.org/3/search/movie"
-TMDB_MOVIE_URL = "https://api.themoviedb.org/3/movie/{id}"
-TMDB_IMAGE_URL = "https://image.tmdb.org/t/p/{size}{path}"
+TMDB_SEARCH_MOVIE = "https://api.themoviedb.org/3/search/movie"
+TMDB_SEARCH_TV    = "https://api.themoviedb.org/3/search/tv"
+TMDB_MOVIE_URL    = "https://api.themoviedb.org/3/movie/{id}"
+TMDB_TV_URL       = "https://api.themoviedb.org/3/tv/{id}"
+TMDB_IMAGE_URL    = "https://image.tmdb.org/t/p/{size}{path}"
 
-# Release-group suffixes — deleted when they appear as standalone tokens
+TV_HINT_RE = re.compile(
+    r"\b(?:"
+    r"season\s*\d+|s\d{1,2}(?:e\d{1,2})?|"
+    r"complete|全\s*\d*\s*集|全\s*ep|episode\s*\d+|"
+    r"ep\s*\d+|第\s*\d+\s*[季集話话]|"
+    r"tv\s*series|tv\s*show|drama\s*series"
+    r")\b",
+    re.I,
+)
+
 RELEASE_GROUPS = [
-    r"YTS(?:\.MX|\.AG|\.AM|\.PE|\.LT)?",
-    r"YIFY",
-    r"VXT(?:-AcEs)?",
-    r"AcEs",
-    r"Ganool(?:\.?iconvid\.co)?",
-    r"CMCT",
-    r"BYNDR",
-    r"Flux",
-    r"GalaxyRG",
-    r"Tv21\.org",
-    r"iconvid\.co",
+    r"YTS(?:\.MX|\.AG|\.AM|\.PE|\.LT)?", r"YIFY",
+    r"VXT(?:-AcEs)?", r"AcEs", r"Ganool(?:\.?iconvid\.co)?",
+    r"CMCT", r"BYNDR", r"Flux", r"GalaxyRG",
+    r"Tv21\.org", r"iconvid\.co",
     r"Vegamovies(?:\.is|\.hot|\.com)?",
-    r"scOrp[_\s]*sujaidr",
-    r"BOKUTOX",
-    r"Deceit",
-    r"ETRG",
-    r"P2P",
-    r"Fugi",
-    r"ZhuixinFan(?:V2)?",
-    r"ENG[\.\s]*HC",
-    r"ENGHC",
-    r"AEF",
-    r"x264-[A-Za-z0-9]+",
-    r"x265-[A-Za-z0-9]+",
+    r"scOrp[_\s]*sujaidr", r"BOKUTOX", r"Deceit", r"ETRG",
+    r"P2P", r"Fugi", r"ZhuixinFan(?:V2)?",
+    r"ENG[\.\s]*HC", r"ENGHC", r"AEF",
+    r"x264-[A-Za-z0-9]+", r"x265-[A-Za-z0-9]+",
+    r"Crazy4ad", r"ShAaNiG", r"MkvCage", r"GalaxyTV",
+    r"\[TGx\]", r"\[ettv\]", r"\[eztv\.re\]", r"\[i_c\]",
+    r"\[y2flix\]", r"\[GWC\]", r"\[fs87\]", r"\[PSA\]",
+    r"\[TorrentCouch\.com\]", r"\[HDzone\]", r"\[NOP\]",
+    r"ION10", r"V3SP4EV3R", r"EliteT", r"STRiFE",
+    r"MiNX", r"PHOENiX", r"MEMENTO", r"TBS",
 ]
 
-# Quality / codec / language / metadata tokens — deleted as whole words
 NOISE_TOKENS = (
     r"720p|1080p|2160p|480p|360p|4k|uhd|hd|"
     r"bluray|blu-ray|brrip|bdrip|webrip|web-dl|webdl|web|"
-    r"hdrip|dvdrip|hdtv|dvd|"
+    r"hdrip|dvdrip|hdtv|dvd|amzn|dsnp|nf|hulu|"
     r"x264|x265|h\.?264|h\.?265|hevc|"
     r"aac|ac3|dts|ddp\d?|dd\d|atmos|"
-    r"10bit|8bit|5\.1|7\.1|2\.0|"
+    r"10bit|8bit|5\.1|7\.1|2\.0|2ch|"
     r"repack|proper|extended|remastered|directors?\.?cut|"
-    r"hc|eng|engsub|engsubs|subs|subbed|subtitles|"
-    r"multi|multisub|japanese|chinese|jap|"
+    r"hc|eng|engsub|engsubs|subs|subbed|subtitles|esubs|e-subs|"
+    r"multi|multisub|multi-sub|japanese|chinese|jap|"
     r"hin-jap|hindi|english|dual\.?audio|dubbed|"
     r"cineby|kisskh|mkv|mp4|avi|"
-    r"vol\.?\s*\d+|disc\s*\d+"
+    r"vol\.?\s*\d+|disc\s*\d+|d\d+|"
+    r"ita|jpn|kor|chi|sub"
 )
 
 
@@ -167,28 +161,18 @@ def extract_years(text: str) -> list[str]:
     return re.findall(r"\b(19\d{2}|20\d{2})\b", text)
 
 
+def looks_like_tv(name: str) -> bool:
+    return bool(TV_HINT_RE.search(name))
+
+
 def clean_and_extract(name: str) -> dict:
-    """
-    Turn a messy folder name into {title, year, variants}.
-
-    "Ant.Man.2015.720p.HDRip.x264.AAC-ETRG"
-        → title="Ant Man", year="2015",
-          variants=["Ant Man", "AntMan", ...]
-
-    "The.Lord.of.the.Rings.The.Two.Towers.EXTENDED.2002.720p…"
-        → title="The Lord of the Rings The Two Towers", year="2002"
-
-    "滿江紅"
-        → title="滿江紅", year=None, variants=["滿江紅"]
-    """
+    """Turn a messy folder name into {title, year, variants}."""
     s = name
 
-    # 1. Remove bracketed segments entirely
     s = re.sub(r"\[[^\]]*\]", " ", s)
     s = re.sub(r"【[^】]*】", " ", s)
     s = re.sub(r"\{[^}]*\}", " ", s)
 
-    # 2. Remove parenthesised segments that contain quality markers
     s = re.sub(
         r"\([^)]*(?:YTS|BluRay|WEB|HDRip|BRRip|DVDrip|720p|1080p|480p|"
         r"2160p|4K|UHD|AAC|x264|x265|H264|H265|DDP|HDTV|Remastered|"
@@ -196,36 +180,38 @@ def clean_and_extract(name: str) -> dict:
         " ", s, flags=re.I,
     )
 
-    # 3. Remove leading junk like "720p HD MOVIE "
     s = re.sub(r"^(?:720p|1080p|2160p|4k)\s+(?:hd\s+)?movie\s+",
                "", s, flags=re.I)
 
-    # 4. Replace separators
     s = s.replace(".", " ").replace("_", " ")
 
-    # 5. Release-group suffixes
     for grp in RELEASE_GROUPS:
         s = re.sub(grp, " ", s, flags=re.I)
 
-    # 6. Trailing "-GROUPNAME" fragments
     s = re.sub(r"-\s*[A-Za-z0-9_]{2,15}\s*$", " ", s)
 
-    # 7. Noise tokens (word boundaries so "HD" won't match inside words)
     s = re.sub(r"\b(?:" + NOISE_TOKENS + r")\b", " ", s, flags=re.I)
 
-    # 8. Episode markers
+    # Season / complete markers
+    s = re.sub(r"\bseason\s*\d+\b", " ", s, flags=re.I)
+    s = re.sub(r"\bcomplete\b", " ", s, flags=re.I)
+    s = re.sub(r"全\s*EP\s*\d+", " ", s, flags=re.I)
+    s = re.sub(r"全\s*\d+\s*集", " ", s)
+    s = re.sub(r"\b\d+\s*集全\b", " ", s)
+    s = re.sub(r"第\s*\d+\s*[季集話话]", " ", s)
+    s = re.sub(r"\b\d{1,3}\s*-\s*\d{1,3}\s*完\b", " ", s)
+
+    # Episode markers
     s = re.sub(r"\bepisode\s+\d+\b", " ", s, flags=re.I)
     s = re.sub(r"\bep\.?\s*\d+\b", " ", s, flags=re.I)
     s = re.sub(r"\bs\d{1,2}\s*e\d{1,2}\b", " ", s, flags=re.I)
+    s = re.sub(r"\bs\d{1,2}\b", " ", s, flags=re.I)
 
-    # 9. Collapse whitespace
     s = re.sub(r"\s+", " ", s).strip(" -.:;,·|/")
 
-    # 10. Year extraction — take the LAST match found
     years = extract_years(s)
     year = years[-1] if years else None
 
-    # 11. Remove ONLY the last year occurrence from the title
     if year:
         idx = s.rfind(year)
         title = (s[:idx] + s[idx + len(year):]).strip(" -.:;,·|/")
@@ -234,10 +220,9 @@ def clean_and_extract(name: str) -> dict:
     else:
         title = s
 
-    # 12. Build search variants
     variants: list[str] = []
     if title:
-        variants.append(title)                                   # original
+        variants.append(title)
         variants.append(re.sub(r"\s+", " ", title.replace("-", " ")).strip())
         variants.append(title.replace("-", ""))
         variants.append(title.replace("'", "").replace("’", ""))
@@ -245,9 +230,7 @@ def clean_and_extract(name: str) -> dict:
         variants.append(re.sub(r"\s+", " ", title.replace("-", " ")
                                 .replace("'", "").replace("’", "")).strip())
 
-    # Deduplicate, preserving order
-    seen: set[str] = set()
-    unique: list[str] = []
+    seen, unique = set(), []
     for v in variants:
         v = v.strip()
         if v and v not in seen:
@@ -258,7 +241,6 @@ def clean_and_extract(name: str) -> dict:
 
 
 def build_variants(title: str) -> list[str]:
-    """Variants derived from an already-cleaned title."""
     if not title:
         return []
     candidates = [
@@ -280,25 +262,60 @@ def build_variants(title: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Folder completeness check
+# ---------------------------------------------------------------------------
+
+
+def has_complete_metadata(folder: Path) -> bool:
+    """
+    True if the folder already contains BOTH:
+      • a file called poster.jpg (case-insensitive), AND
+      • at least one .nfo file anywhere in that folder.
+    """
+    has_poster = False
+    has_nfo = False
+    try:
+        for p in folder.iterdir():
+            if not p.is_file():
+                continue
+            low = p.name.lower()
+            if low == "poster.jpg":
+                has_poster = True
+            elif low.endswith(".nfo"):
+                has_nfo = True
+            if has_poster and has_nfo:
+                return True
+    except (PermissionError, FileNotFoundError):
+        return False
+    return has_poster and has_nfo
+
+
+# ---------------------------------------------------------------------------
 # TMDB calls
 # ---------------------------------------------------------------------------
 
 
-def search_movie_robust(
+def search_robust(
     title: str,
     year: str | None,
+    media_type: str,
     api_key: str,
     language: str,
     include_adult: bool,
     log_cb=None,
 ):
-    """
-    Try every title variant, first with year, then without.
-    Returns (hit_dict, variant_used, year_used) or (None, None, None).
-    """
     variants = build_variants(title)
     if not variants:
         return None, None, None
+
+    if media_type == "tv":
+        endpoint = TMDB_SEARCH_TV
+        year_param = "first_air_date_year"
+        date_field = "first_air_date"
+    else:
+        endpoint = TMDB_SEARCH_MOVIE
+        year_param = "year"
+        date_field = "release_date"
 
     attempts: list[tuple[str, str | None]] = []
     for v in variants:
@@ -315,9 +332,9 @@ def search_movie_robust(
             "page": 1,
         }
         if y:
-            params["year"] = y
+            params[year_param] = y
         try:
-            r = requests.get(TMDB_SEARCH_URL, params=params, timeout=15)
+            r = requests.get(endpoint, params=params, timeout=15)
             if r.status_code == 429:
                 if log_cb:
                     log_cb("  ! rate-limited, sleeping 2 s")
@@ -325,31 +342,63 @@ def search_movie_robust(
                 continue
             r.raise_for_status()
             results = r.json().get("results", [])
-            if results:
-                if log_cb:
-                    log_cb(f"  ✓ query={v!r} year={y!r} → "
-                           f"{results[0].get('title')}")
-                return results[0], v, y
-            else:
-                if log_cb:
-                    log_cb(f"  · query={v!r} year={y!r} → 0 results")
         except Exception as exc:
             if log_cb:
-                log_cb(f"  ! query={v!r} year={y!r}: {exc}")
-        time.sleep(0.1)
+                log_cb(f"  ! query={v!r}: {exc}")
+            time.sleep(0.1)
+            continue
+
+        if not results:
+            if log_cb:
+                log_cb(f"  · [{media_type}] query={v!r} "
+                       f"{year_param}={y!r} → 0 results")
+            time.sleep(0.1)
+            continue
+
+        if y:
+            matching = [
+                r for r in results
+                if (r.get(date_field) or "").startswith(y)
+            ]
+            if matching:
+                if log_cb:
+                    name = (matching[0].get("title")
+                            or matching[0].get("name"))
+                    log_cb(f"  ✓ [{media_type}] query={v!r} "
+                           f"{year_param}={y!r} → {name} (year match)")
+                return matching[0], v, y
+            else:
+                top_year = (results[0].get(date_field) or "")[:4]
+                if log_cb:
+                    name = (results[0].get("title")
+                            or results[0].get("name"))
+                    log_cb(f"  ⚠ [{media_type}] query={v!r} "
+                           f"{year_param}={y!r} → {name} "
+                           f"(year mismatch: found {top_year or '?'})")
+                return results[0], v, y
+        else:
+            if log_cb:
+                name = results[0].get("title") or results[0].get("name")
+                log_cb(f"  ✓ [{media_type}] query={v!r} → {name}")
+            return results[0], v, None
 
     return None, None, None
 
 
-def tmdb_details(movie_id: int, api_key: str, language: str) -> dict:
+def tmdb_details(movie_id: int, media_type: str,
+                 api_key: str, language: str) -> dict:
+    if media_type == "tv":
+        url = TMDB_TV_URL.format(id=movie_id)
+        append = "credits,external_ids"
+    else:
+        url = TMDB_MOVIE_URL.format(id=movie_id)
+        append = "credits"
     params = {
         "api_key": api_key,
         "language": language,
-        "append_to_response": "credits",
+        "append_to_response": append,
     }
-    r = requests.get(
-        TMDB_MOVIE_URL.format(id=movie_id), params=params, timeout=15
-    )
+    r = requests.get(url, params=params, timeout=15)
     r.raise_for_status()
     return r.json()
 
@@ -363,8 +412,12 @@ def download_poster(poster_path: str, dest: Path, image_size: str) -> None:
     dest.write_bytes(r.content)
 
 
-def write_nfo(movie: dict, folder: Path, actors_count: int) -> Path:
-    """Write a Kodi-compatible NFO named after the first .mp4 (or folder)."""
+# ---------------------------------------------------------------------------
+# NFO writers
+# ---------------------------------------------------------------------------
+
+
+def write_movie_nfo(movie: dict, folder: Path, actors_count: int) -> Path:
     mp4_files = sorted(folder.glob("*.mp4"))
     nfo_stem = mp4_files[0].stem if mp4_files else folder.name
     nfo_path = folder / f"{nfo_stem}.nfo"
@@ -378,7 +431,6 @@ def write_nfo(movie: dict, folder: Path, actors_count: int) -> Path:
     if release:
         ET.SubElement(root, "premiered").text = release
     ET.SubElement(root, "year").text = release[:4] if release else ""
-
     ET.SubElement(root, "plot").text = movie.get("overview", "") or ""
 
     rating = movie.get("vote_average")
@@ -405,6 +457,51 @@ def write_nfo(movie: dict, folder: Path, actors_count: int) -> Path:
     return nfo_path
 
 
+def write_tv_nfo(show: dict, folder: Path, actors_count: int) -> Path:
+    nfo_path = folder / f"{folder.name}.nfo"
+
+    root = ET.Element("tvshow")
+    name = show.get("name") or show.get("original_name") or ""
+    ET.SubElement(root, "title").text = name
+    ET.SubElement(root, "originaltitle").text = show.get("original_name", name)
+
+    first_air = show.get("first_air_date", "") or ""
+    if first_air:
+        ET.SubElement(root, "premiered").text = first_air
+    ET.SubElement(root, "year").text = first_air[:4] if first_air else ""
+    ET.SubElement(root, "plot").text = show.get("overview", "") or ""
+
+    rating = show.get("vote_average")
+    if rating is not None:
+        ET.SubElement(root, "rating").text = f"{rating:.1f}"
+
+    tmdb_id = show.get("id")
+    if tmdb_id:
+        uid = ET.SubElement(root, "uniqueid", type="tmdb")
+        uid.set("default", "true")
+        uid.text = str(tmdb_id)
+
+    cast = (show.get("credits", {}).get("cast") or [])[:actors_count]
+    for person in cast:
+        actor_el = ET.SubElement(root, "actor")
+        ET.SubElement(actor_el, "name").text = person.get("name", "") or ""
+        ET.SubElement(actor_el, "role").text = person.get("character", "") or ""
+
+    try:
+        ET.indent(root, space="  ")
+    except AttributeError:
+        pass
+    ET.ElementTree(root).write(nfo_path, encoding="utf-8", xml_declaration=True)
+    return nfo_path
+
+
+def write_nfo(details: dict, folder: Path, media_type: str,
+              actors_count: int) -> Path:
+    if media_type == "tv":
+        return write_tv_nfo(details, folder, actors_count)
+    return write_movie_nfo(details, folder, actors_count)
+
+
 # ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
@@ -413,22 +510,24 @@ def write_nfo(movie: dict, folder: Path, actors_count: int) -> Path:
 class FetchApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("TMDB Poster & NFO Fetcher")
-        self.geometry("1500x860")
-        self.minsize(1200, 600)
+        self.title("TMDB Poster & NFO Fetcher  —  Batch Movies / TV")
+        self.geometry("1550x900")
+        self.minsize(1200, 620)
 
         self.row_data: list[dict] = []
         self.worker: threading.Thread | None = None
         self.stop_flag = threading.Event()
         self.msg_queue: queue.Queue = queue.Queue()
 
-        self.api_key_var    = tk.StringVar()
-        self.language_var   = tk.StringVar(value="en-US")
-        self.image_size_var = tk.StringVar(value="w500")
-        self.actors_var     = tk.IntVar(value=10)
-        self.adult_var      = tk.BooleanVar(value=True)
-        self.progress_var   = tk.DoubleVar(value=0.0)
-        self.status_var     = tk.StringVar(value="Ready.")
+        self.api_key_var        = tk.StringVar()
+        self.language_var       = tk.StringVar(value="en-US")
+        self.image_size_var     = tk.StringVar(value="w500")
+        self.actors_var         = tk.IntVar(value=10)
+        self.adult_var          = tk.BooleanVar(value=True)
+        self.batch_type_var     = tk.StringVar(value="movie")
+        self.skip_existing_var  = tk.BooleanVar(value=True)
+        self.progress_var       = tk.DoubleVar(value=0.0)
+        self.status_var         = tk.StringVar(value="Ready.")
 
         self._build_ui()
         self._load_config()
@@ -442,18 +541,20 @@ class FetchApp(tk.Tk):
     def _build_ui(self) -> None:
         self.rowconfigure(0, weight=0)
         self.rowconfigure(1, weight=0)
-        self.rowconfigure(2, weight=5)
-        self.rowconfigure(3, weight=0)
-        self.rowconfigure(4, weight=1)
+        self.rowconfigure(2, weight=0)
+        self.rowconfigure(3, weight=5)
+        self.rowconfigure(4, weight=0)
+        self.rowconfigure(5, weight=1)
         self.columnconfigure(0, weight=1)
 
-        self._build_settings()
+        self._build_api_bar()
+        self._build_batch_bar()
         self._build_toolbar()
         self._build_tree()
         self._build_action_bar()
         self._build_log()
 
-    def _build_settings(self) -> None:
+    def _build_api_bar(self) -> None:
         f = ttk.Frame(self, padding=(10, 8, 10, 4))
         f.grid(row=0, column=0, sticky="ew")
 
@@ -476,9 +577,43 @@ class FetchApp(tk.Tk):
         ttk.Checkbutton(f, text="Include adult results",
                         variable=self.adult_var).pack(side=tk.LEFT)
 
+    def _build_batch_bar(self) -> None:
+        f = ttk.LabelFrame(self, text="Batch media type", padding=(10, 4, 10, 6))
+        f.grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 4))
+
+        ttk.Label(
+            f,
+            text=("Choose what EVERY folder in this batch is. "
+                  "Reality / scripted / anime / variety series all count as "
+                  "TV Series on TMDB (e.g. Singles Inferno, 19th Floor, "
+                  "Game of Thrones). Season / S0x / COMPLETE / 第X季 markers "
+                  "are automatically stripped from the search query."),
+            foreground="gray",
+            wraplength=1200,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 4))
+
+        row = ttk.Frame(f)
+        row.pack(fill=tk.X)
+
+        ttk.Radiobutton(row, text="🎬 Movies",
+                        variable=self.batch_type_var, value="movie",
+                        command=self._on_batch_type_changed).pack(side=tk.LEFT)
+        ttk.Radiobutton(row, text="📺 TV Series",
+                        variable=self.batch_type_var, value="tv",
+                        command=self._on_batch_type_changed).pack(
+            side=tk.LEFT, padx=(12, 0))
+
+        ttk.Button(row, text="↻ Apply this type to all loaded rows",
+                   command=self._apply_batch_type_to_all).pack(
+            side=tk.LEFT, padx=(24, 0))
+
+        self.batch_hint = ttk.Label(row, text="", foreground="gray")
+        self.batch_hint.pack(side=tk.LEFT, padx=(24, 0))
+
     def _build_toolbar(self) -> None:
         f = ttk.Frame(self, padding=(10, 4, 10, 4))
-        f.grid(row=1, column=0, sticky="ew")
+        f.grid(row=2, column=0, sticky="ew")
 
         self.btn_add = ttk.Button(f, text="➕ Add Folder…",
                                   command=self._add_folder_dialog)
@@ -496,30 +631,39 @@ class FetchApp(tk.Tk):
                                     command=self._clear_all)
         self.btn_clear.pack(side=tk.LEFT, padx=(6, 0))
 
+        ttk.Label(f, text="  |  ").pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            f,
+            text="Skip folders that already have poster.jpg + .nfo",
+            variable=self.skip_existing_var,
+        ).pack(side=tk.LEFT)
+
         ttk.Label(f, text="   ").pack(side=tk.LEFT)
         ttk.Label(f, textvariable=self.status_var,
                   foreground="gray").pack(side=tk.LEFT, padx=(20, 0))
 
     def _build_tree(self) -> None:
         f = ttk.Frame(self, padding=(10, 4, 10, 4))
-        f.grid(row=2, column=0, sticky="nsew")
+        f.grid(row=3, column=0, sticky="nsew")
         f.rowconfigure(0, weight=1)
         f.columnconfigure(0, weight=1)
 
-        cols = ("idx", "folder", "query", "year", "match",
-                "tmdb", "poster", "nfo", "status")
+        cols = ("idx", "folder", "type", "hint", "query", "year",
+                "match", "tmdb", "poster", "nfo", "status")
         self.tree = ttk.Treeview(f, columns=cols, show="headings",
                                  selectmode="extended")
         headings = {
             "idx":    ("#",              40,  "e"),
-            "folder": ("Folder",        240,  "w"),
-            "query":  ("Query (Title)", 220,  "w"),
-            "year":   ("Year",           55, "center"),
-            "match":  ("Matched (Title)",260, "w"),
-            "tmdb":   ("TMDB ID",        85, "center"),
-            "poster": ("Poster",         60, "center"),
-            "nfo":    ("NFO",            60, "center"),
-            "status": ("Status",        240,  "w"),
+            "folder": ("Folder",        230,  "w"),
+            "type":   ("Type",           55, "center"),
+            "hint":   ("Hint",           90, "center"),
+            "query":  ("Query (Title)", 200,  "w"),
+            "year":   ("Year",           50, "center"),
+            "match":  ("Matched (Title)",220, "w"),
+            "tmdb":   ("TMDB ID",        80, "center"),
+            "poster": ("Poster",         55, "center"),
+            "nfo":    ("NFO",            55, "center"),
+            "status": ("Status",        200,  "w"),
         }
         for c, (text, w, anchor) in headings.items():
             self.tree.heading(c, text=text)
@@ -530,6 +674,7 @@ class FetchApp(tk.Tk):
         self.tree.tag_configure("matched", background="#e8f0fe")
         self.tree.tag_configure("error",   background="#fdecea")
         self.tree.tag_configure("warn",    background="#fff4e5")
+        self.tree.tag_configure("hint",    foreground="#c47a00")
 
         vsb = ttk.Scrollbar(f, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(f, orient="horizontal", command=self.tree.xview)
@@ -546,6 +691,8 @@ class FetchApp(tk.Tk):
                                    command=self._on_edit_query)
         self._ctx_menu.add_command(label="✏️ Set TMDB ID…",
                                    command=self._on_set_tmdb_id)
+        self._ctx_menu.add_command(label="🔀 Toggle this row Movie / TV",
+                                   command=self._on_toggle_media_type)
         self._ctx_menu.add_command(label="🔄 Re-process this row",
                                    command=self._on_reprocess_row)
         self._ctx_menu.add_separator()
@@ -556,7 +703,7 @@ class FetchApp(tk.Tk):
 
     def _build_action_bar(self) -> None:
         f = ttk.Frame(self, padding=(10, 6, 10, 4))
-        f.grid(row=3, column=0, sticky="ew")
+        f.grid(row=4, column=0, sticky="ew")
 
         self.btn_search = ttk.Button(
             f, text="🔍 Search All",
@@ -583,7 +730,7 @@ class FetchApp(tk.Tk):
 
     def _build_log(self) -> None:
         f = ttk.LabelFrame(self, text="Log", padding=6)
-        f.grid(row=4, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        f.grid(row=5, column=0, sticky="nsew", padx=10, pady=(0, 10))
         f.rowconfigure(0, weight=1)
         f.columnconfigure(0, weight=1)
 
@@ -605,14 +752,19 @@ class FetchApp(tk.Tk):
         self.image_size_var.set(cfg.get("image_size", "w500"))
         self.actors_var.set(int(cfg.get("actors", 10)))
         self.adult_var.set(bool(cfg.get("adult", True)))
+        self.batch_type_var.set(cfg.get("batch_type", "movie"))
+        self.skip_existing_var.set(bool(cfg.get("skip_existing", True)))
+        self._on_batch_type_changed()
 
     def _save_config(self) -> None:
         save_config({
-            "api_key":    self.api_key_var.get().strip(),
-            "language":   self.language_var.get(),
-            "image_size": self.image_size_var.get(),
-            "actors":     int(self.actors_var.get()),
-            "adult":      bool(self.adult_var.get()),
+            "api_key":       self.api_key_var.get().strip(),
+            "language":      self.language_var.get(),
+            "image_size":    self.image_size_var.get(),
+            "actors":        int(self.actors_var.get()),
+            "adult":         bool(self.adult_var.get()),
+            "batch_type":    self.batch_type_var.get(),
+            "skip_existing": bool(self.skip_existing_var.get()),
         })
 
     def _on_close(self) -> None:
@@ -626,15 +778,80 @@ class FetchApp(tk.Tk):
         self.destroy()
 
     # ==================================================================
+    # Batch-type bar
+    # ==================================================================
+
+    def _on_batch_type_changed(self) -> None:
+        t = self.batch_type_var.get()
+        label = "Movies" if t == "movie" else "TV Series"
+        self.batch_hint.config(
+            text=f"New folders will be added as: {label}"
+        )
+
+    def _apply_batch_type_to_all(self) -> None:
+        if not self.row_data:
+            messagebox.showinfo("No rows",
+                                "Load some folders first.")
+            return
+        t = self.batch_type_var.get()
+        label = "Movies" if t == "movie" else "TV Series"
+        if not messagebox.askyesno(
+            "Apply to all rows",
+            f"Set ALL {len(self.row_data)} loaded rows to {label}?\n\n"
+            "Any previous matches will be cleared so you can re-search."
+        ):
+            return
+        for i, row in enumerate(self.row_data):
+            row["media_type"] = t
+            row["match"] = ""
+            row["tmdb_id"] = ""
+            row["poster"] = ""
+            row["nfo"] = ""
+            row["status"] = f"Type set to {label} — re-search to apply"
+            self._apply_row_update(i, {})
+        self._log(f"Applied batch type {label} to all {len(self.row_data)} rows.")
+
+    # ==================================================================
     # Folder management
     # ==================================================================
 
-    def _add_folder_path(self, path: Path) -> None:
+    def _add_folder_path(self, path: Path, silent: bool = False) -> bool:
+        """
+        Add a folder to the list.
+        Returns True if added, False if skipped (already in list,
+        not a directory, or already has poster.jpg + .nfo).
+        """
         if any(r["path"] == path for r in self.row_data):
-            return
+            return False
+        if not path.is_dir():
+            return False
+
+        if self.skip_existing_var.get() and has_complete_metadata(path):
+            if not silent:
+                self._log(f"⏭️ Skipped (already has poster.jpg + .nfo): "
+                          f"{path.name}")
+                messagebox.showinfo(
+                    "Skipped",
+                    f"This folder already has poster.jpg and .nfo:\n\n"
+                    f"{path}\n\n"
+                    f"It was NOT added to the process list.\n\n"
+                    f"To force-add it, untick "
+                    f"'Skip folders that already have poster.jpg + .nfo'.",
+                )
+            return False
+
         cleaned = clean_and_extract(path.name)
+        media_type = self.batch_type_var.get()
+
+        hint = ""
+        if media_type == "movie" and looks_like_tv(path.name):
+            hint = "looks like TV"
+        elif media_type == "tv" and not looks_like_tv(path.name):
+            hint = "check type"
+
         row = {
             "path":        path,
+            "media_type":  media_type,
             "query_title": cleaned["title"],
             "query_year":  cleaned["year"] or "",
             "match":       "",
@@ -643,15 +860,17 @@ class FetchApp(tk.Tk):
             "poster":      "",
             "nfo":         "",
             "status":      "Pending",
+            "hint":        hint,
         }
         iid = self.tree.insert("", "end", values=(
-            "", path.name,
+            "", path.name, media_type.upper(), hint,
             cleaned["title"], cleaned["year"] or "",
             "", "", "", "", "Pending",
         ))
         row["iid"] = iid
         self.row_data.append(row)
         self._renumber()
+        return True
 
     def _renumber(self) -> None:
         for i, row in enumerate(self.row_data):
@@ -660,9 +879,13 @@ class FetchApp(tk.Tk):
             self.tree.item(row["iid"], values=vals)
 
     def _add_folder_dialog(self) -> None:
-        d = filedialog.askdirectory(title="Select a movie folder")
-        if d:
-            self._add_folder_path(Path(d))
+        d = filedialog.askdirectory(title="Select a movie or TV folder")
+        if not d:
+            return
+        path = Path(d)
+        added = self._add_folder_path(path, silent=False)
+        if added:
+            self._log(f"Added: {path.name}")
 
     def _add_directory_dialog(self) -> None:
         d = filedialog.askdirectory(
@@ -676,13 +899,50 @@ class FetchApp(tk.Tk):
             messagebox.showinfo("No subfolders",
                                 f"No subfolders found inside:\n{parent}")
             return
+
+        label = "Movies" if self.batch_type_var.get() == "movie" else "TV Series"
+        skip_note = ""
+        if self.skip_existing_var.get():
+            skip_note = ("\n\nFolders that already contain poster.jpg + .nfo "
+                         "will be skipped.")
+
         if not messagebox.askyesno(
             "Add subfolders",
-            f"Add {len(subs)} subfolders of:\n{parent}\n\nContinue?"):
+            f"Add {len(subs)} subfolders of:\n{parent}\n\n"
+            f"They will be added as: {label}.{skip_note}"):
             return
+
+        added = 0
+        skipped_complete = 0
+        skipped_dupe = 0
+
         for p in subs:
-            self._add_folder_path(p)
-        self._log(f"Added {len(subs)} subfolders from {parent}")
+            if any(r["path"] == p for r in self.row_data):
+                skipped_dupe += 1
+                continue
+            if self.skip_existing_var.get() and has_complete_metadata(p):
+                self._log(f"⏭️ Skipped (already has poster.jpg + .nfo): "
+                          f"{p.name}")
+                skipped_complete += 1
+                continue
+            if self._add_folder_path(p, silent=True):
+                added += 1
+
+        parts = [f"Added {added} of {len(subs)} subfolders."]
+        if skipped_complete:
+            parts.append(f"Skipped {skipped_complete} already-complete.")
+        if skipped_dupe:
+            parts.append(f"Skipped {skipped_dupe} already-in-list.")
+        self._log(" ".join(parts))
+
+        if skipped_complete:
+            messagebox.showinfo(
+                "Added",
+                " ".join(parts) + "\n\n"
+                "Folders with existing poster.jpg + .nfo were NOT added.\n"
+                "Untick 'Skip folders that already have poster.jpg + .nfo' "
+                "to include them.",
+            )
 
     def _remove_selected(self) -> None:
         for iid in self.tree.selection():
@@ -769,14 +1029,16 @@ class FetchApp(tk.Tk):
 
             title = row.get("query_title") or ""
             year  = row.get("query_year") or None
+            mtype = row.get("media_type", "movie")
 
             self.msg_queue.put({"type": "row", "index": i,
                                 "fields": {"status": "Searching…"}})
             self.msg_queue.put({"type": "log",
-                                "text": f"→ {row['path'].name}"})
+                                "text": f"→ [{mtype}] {row['path'].name}  "
+                                        f"(query: {title!r} year: {year!r})"})
 
-            hit, used_v, used_y = search_movie_robust(
-                title, year,
+            hit, used_v, used_y = search_robust(
+                title, year, mtype,
                 settings["api_key"], settings["language"],
                 settings["include_adult"],
                 log_cb=lambda t: self.msg_queue.put(
@@ -784,8 +1046,12 @@ class FetchApp(tk.Tk):
             )
 
             if hit:
-                year_r = (hit.get("release_date") or "")[:4]
-                title_r = hit.get("title") or hit.get("original_title") or "?"
+                if mtype == "tv":
+                    year_r = (hit.get("first_air_date") or "")[:4]
+                    title_r = hit.get("name") or hit.get("original_name") or "?"
+                else:
+                    year_r = (hit.get("release_date") or "")[:4]
+                    title_r = hit.get("title") or hit.get("original_title") or "?"
                 match_str = f"{title_r} ({year_r})" if year_r else title_r
                 self.msg_queue.put({"type": "row", "index": i,
                                     "fields": {
@@ -800,8 +1066,7 @@ class FetchApp(tk.Tk):
                 self.msg_queue.put({"type": "row", "index": i,
                                     "fields": {"status": "No match"}})
                 self.msg_queue.put({"type": "log",
-                                    "text": f"? No match: {row['path'].name} "
-                                            f"(title={title!r} year={year!r})"})
+                                    "text": f"? No match: {row['path'].name}"})
             time.sleep(0.15)
 
     def _download_phase(self, settings: dict) -> None:
@@ -816,8 +1081,10 @@ class FetchApp(tk.Tk):
             if not tmdb_id:
                 continue
 
+            mtype = row.get("media_type", "movie")
             try:
-                details = tmdb_details(int(tmdb_id), settings["api_key"],
+                details = tmdb_details(int(tmdb_id), mtype,
+                                       settings["api_key"],
                                        settings["language"])
             except Exception as exc:  # noqa: BLE001
                 self.msg_queue.put({"type": "row", "index": i,
@@ -844,7 +1111,8 @@ class FetchApp(tk.Tk):
                                     "fields": {"poster": "—"}})
 
             try:
-                nfo = write_nfo(details, row["path"], settings["actors"])
+                nfo = write_nfo(details, row["path"], mtype,
+                                settings["actors"])
                 self.msg_queue.put({"type": "row", "index": i,
                                     "fields": {"nfo": "✅",
                                                "status": f"Done → {nfo.name}"}})
@@ -872,7 +1140,7 @@ class FetchApp(tk.Tk):
             self.status_var.set("Ready.")
 
     # ==================================================================
-    # Queue polling & row updates
+    # Queue polling
     # ==================================================================
 
     def _poll_queue(self) -> None:
@@ -912,9 +1180,10 @@ class FetchApp(tk.Tk):
             tag = "done"
         elif status.startswith("Matched"):
             tag = "matched"
-        elif ("error" in status.lower()) or status.startswith("❌"):
+        elif "error" in status.lower() or status.startswith("❌"):
             tag = "error"
-        elif status in ("No match",) or status.startswith("Query edited"):
+        elif status in ("No match",) or status.startswith("Query edited") \
+                or status.startswith("Type ") or status.startswith("Type set"):
             tag = "warn"
         else:
             tag = ""
@@ -924,6 +1193,8 @@ class FetchApp(tk.Tk):
             values=(
                 i + 1,
                 row["path"].name,
+                row.get("media_type", "movie").upper(),
+                row.get("hint", ""),
                 row.get("query_title", ""),
                 row.get("query_year", ""),
                 row.get("match", ""),
@@ -935,7 +1206,7 @@ class FetchApp(tk.Tk):
         )
 
     # ==================================================================
-    # Context menu actions
+    # Context menu
     # ==================================================================
 
     def _on_right_click(self, event) -> None:
@@ -947,11 +1218,9 @@ class FetchApp(tk.Tk):
 
     def _on_double_click(self, event) -> None:
         col = self.tree.identify_column(event.x)
-        if col == "#3":          # Query column
+        if col in ("#5", "#6"):
             self._on_edit_query()
-        elif col == "#4":        # Year column
-            self._on_edit_query()
-        elif col == "#6":        # TMDB ID column
+        elif col == "#8":
             self._on_set_tmdb_id()
 
     def _selected_row(self) -> tuple[int, dict] | tuple[None, None]:
@@ -964,12 +1233,25 @@ class FetchApp(tk.Tk):
                 return i, r
         return None, None
 
+    def _on_toggle_media_type(self) -> None:
+        i, row = self._selected_row()
+        if row is None:
+            return
+        new_type = "tv" if row.get("media_type") == "movie" else "movie"
+        row["media_type"] = new_type
+        row["match"] = ""
+        row["tmdb_id"] = ""
+        row["poster"] = ""
+        row["nfo"] = ""
+        row["status"] = f"Type toggled to {new_type.upper()} — re-search to apply"
+        self._apply_row_update(i, {})
+        self._log(f"{row['path'].name}: media_type → {new_type}")
+
     def _on_edit_query(self) -> None:
         i, row = self._selected_row()
         if row is None:
             return
 
-        # Dialog with two fields
         dlg = tk.Toplevel(self)
         dlg.title("Edit query")
         dlg.transient(self)
@@ -984,31 +1266,27 @@ class FetchApp(tk.Tk):
                   wraplength=380).grid(row=0, column=1, sticky="w",
                                        columnspan=2, pady=(0, 8))
 
-        ttk.Label(frm, text="Search title:").grid(row=1, column=0, sticky="w")
+        ttk.Label(frm, text="Media type:").grid(row=1, column=0, sticky="w")
+        type_var = tk.StringVar(value=row.get("media_type", "movie"))
+        ttk.Combobox(frm, textvariable=type_var,
+                     values=["movie", "tv"], width=10,
+                     state="readonly").grid(row=1, column=1, sticky="w",
+                                            pady=(0, 6))
+
+        ttk.Label(frm, text="Search title:").grid(row=2, column=0, sticky="w")
         title_var = tk.StringVar(value=row.get("query_title", ""))
         ttk.Entry(frm, textvariable=title_var, width=42).grid(
-            row=1, column=1, sticky="ew", columnspan=2, pady=(0, 6))
+            row=2, column=1, sticky="ew", columnspan=2, pady=(0, 6))
 
-        ttk.Label(frm, text="Year (optional):").grid(row=2, column=0, sticky="w")
+        ttk.Label(frm, text="Year (optional):").grid(row=3, column=0, sticky="w")
         year_var = tk.StringVar(value=row.get("query_year", ""))
         ttk.Entry(frm, textvariable=year_var, width=10).grid(
-            row=2, column=1, sticky="w", pady=(0, 6))
-
-        ttk.Label(
-            frm,
-            text=("Variants that will be tried:\n"
-                  "• title with hyphen → space\n"
-                  "• title with hyphens/apostrophes removed\n"
-                  "• title with colons removed\n"
-                  "Each tried with year first, then without."),
-            foreground="gray",
-            justify="left",
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 6))
+            row=3, column=1, sticky="w", pady=(0, 6))
 
         auto_search_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text="Search this row after saving",
                         variable=auto_search_var).grid(
-            row=4, column=0, columnspan=3, sticky="w")
+            row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         def _ok():
             new_title = title_var.get().strip()
@@ -1020,7 +1298,7 @@ class FetchApp(tk.Tk):
                 return
             row["query_title"] = new_title
             row["query_year"]  = new_year
-            # Clear prior match so a re-search will actually run
+            row["media_type"]  = type_var.get()
             row["match"] = ""
             row["tmdb_id"] = ""
             row["poster"] = ""
@@ -1028,19 +1306,19 @@ class FetchApp(tk.Tk):
             row["status"] = "Query edited — re-search to apply"
             self._apply_row_update(i, {})
             self._log(f"Query for {row['path'].name}: "
-                      f"title={new_title!r} year={new_year!r}")
+                      f"title={new_title!r} year={new_year!r} "
+                      f"type={row['media_type']}")
             dlg.destroy()
 
             if auto_search_var.get() and new_title:
                 self._reprocess_row_async(i)
 
-        def _cancel():
-            dlg.destroy()
-
         btns = ttk.Frame(frm)
         btns.grid(row=5, column=0, columnspan=3, sticky="e", pady=(8, 0))
-        ttk.Button(btns, text="Cancel", command=_cancel).pack(side=tk.RIGHT)
-        ttk.Button(btns, text="Save", command=_ok).pack(side=tk.RIGHT, padx=(0, 6))
+        ttk.Button(btns, text="Cancel",
+                   command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Save", command=_ok).pack(side=tk.RIGHT,
+                                                        padx=(0, 6))
 
         dlg.wait_window()
 
@@ -1073,11 +1351,6 @@ class FetchApp(tk.Tk):
             messagebox.showwarning("Busy",
                                    "Wait for the current run to finish.")
             return
-        api_key = self.api_key_var.get().strip()
-        if not api_key:
-            messagebox.showerror("API key required",
-                                 "Please enter your TMDB API key.")
-            return
         self._reprocess_row_async(i)
 
     def _reprocess_row_async(self, i: int) -> None:
@@ -1097,6 +1370,7 @@ class FetchApp(tk.Tk):
     def _reprocess_single(self, i: int, settings: dict) -> None:
         try:
             row = self.row_data[i]
+            mtype = row.get("media_type", "movie")
             tmdb_id = row.get("override_id") or row.get("tmdb_id")
 
             if not tmdb_id:
@@ -1105,9 +1379,9 @@ class FetchApp(tk.Tk):
                 self.msg_queue.put({"type": "row", "index": i,
                                     "fields": {"status": "Searching…"}})
                 self.msg_queue.put({"type": "log",
-                                    "text": f"→ {row['path'].name}"})
-                hit, _, _ = search_movie_robust(
-                    title, year,
+                                    "text": f"→ [{mtype}] {row['path'].name}"})
+                hit, _, _ = search_robust(
+                    title, year, mtype,
                     settings["api_key"], settings["language"],
                     settings["include_adult"],
                     log_cb=lambda t: self.msg_queue.put(
@@ -1117,8 +1391,12 @@ class FetchApp(tk.Tk):
                                         "fields": {"status": "No match"}})
                     return
                 tmdb_id = hit["id"]
-                year_r = (hit.get("release_date") or "")[:4]
-                title_r = hit.get("title") or hit.get("original_title") or "?"
+                if mtype == "tv":
+                    year_r = (hit.get("first_air_date") or "")[:4]
+                    title_r = hit.get("name") or hit.get("original_name") or "?"
+                else:
+                    year_r = (hit.get("release_date") or "")[:4]
+                    title_r = hit.get("title") or hit.get("original_title") or "?"
                 self.msg_queue.put({"type": "row", "index": i,
                                     "fields": {
                                         "tmdb_id": str(tmdb_id),
@@ -1128,7 +1406,8 @@ class FetchApp(tk.Tk):
                                     }})
                 time.sleep(0.15)
 
-            details = tmdb_details(int(tmdb_id), settings["api_key"],
+            details = tmdb_details(int(tmdb_id), mtype,
+                                   settings["api_key"],
                                    settings["language"])
             pp = details.get("poster_path")
             if pp:
@@ -1143,7 +1422,8 @@ class FetchApp(tk.Tk):
                     self.msg_queue.put({"type": "log",
                                         "text": f"✗ Poster: {exc}"})
             try:
-                nfo = write_nfo(details, row["path"], settings["actors"])
+                nfo = write_nfo(details, row["path"], mtype,
+                                settings["actors"])
                 self.msg_queue.put({"type": "row", "index": i,
                                     "fields": {"nfo": "✅",
                                                "status": f"Done → {nfo.name}"}})
